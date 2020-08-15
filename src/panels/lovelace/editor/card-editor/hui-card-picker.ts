@@ -1,4 +1,7 @@
+import "@material/mwc-tab-bar/mwc-tab-bar";
+import "@material/mwc-tab/mwc-tab";
 import Fuse from "fuse.js";
+import memoizeOne from "memoize-one";
 import {
   css,
   CSSResult,
@@ -11,8 +14,8 @@ import {
   TemplateResult,
 } from "lit-element";
 import { classMap } from "lit-html/directives/class-map";
+import { styleMap } from "lit-html/directives/style-map";
 import { until } from "lit-html/directives/until";
-import memoizeOne from "memoize-one";
 import { fireEvent } from "../../../../common/dom/fire_event";
 import "../../../../common/search/search-input";
 import { UNAVAILABLE_STATES } from "../../../../data/entity";
@@ -23,18 +26,23 @@ import {
   CUSTOM_TYPE_PREFIX,
   getCustomCardEntry,
 } from "../../../../data/lovelace_custom_cards";
-import { HomeAssistant } from "../../../../types";
+import type { HomeAssistant } from "../../../../types";
 import {
-  calcUnusedEntities,
   computeUsedEntities,
+  computeUnusedEntities,
 } from "../../common/compute-unused-entities";
 import { tryCreateCardElement } from "../../create-element/create-card-element";
 import { LovelaceCard } from "../../types";
 import { getCardStubConfig } from "../get-card-stub-config";
 import { CardPickTarget, Card } from "../types";
 import { coreCards } from "../lovelace-cards";
-import { styleMap } from "lit-html/directives/style-map";
 import "../../../../components/ha-circular-progress";
+import "../../../../components/data-table/ha-data-table";
+import { computeStateName } from "../../../../common/entity/compute_state_name";
+import { computeDomain } from "../../../../common/entity/compute_domain";
+import { computeRTLDirection } from "../../../../common/util/compute_rtl";
+import type { DataTableRowData } from "../../../../components/data-table/ha-data-table";
+import "../../../../components/entity/state-badge";
 
 interface CardElement {
   card: Card;
@@ -61,6 +69,8 @@ export class HuiCardPicker extends LitElement {
 
   @internalProperty() private _height?: number;
 
+  @internalProperty() private _tabIndex = 0;
+
   private _filterCards = memoizeOne(
     (cardElements: CardElement[], filter?: string): CardElement[] => {
       if (!filter) {
@@ -83,6 +93,36 @@ export class HuiCardPicker extends LitElement {
     }
   );
 
+  private _columns = memoizeOne(() => {
+    return {
+      icon: {
+        title: "",
+        type: "icon",
+        template: (_icon, entity: any) => html`
+          <state-badge
+            .hass=${this.hass!}
+            .stateObj=${entity.stateObj}
+          ></state-badge>
+        `,
+      },
+      name: {
+        title: this.hass!.localize("ui.panel.lovelace.unused_entities.entity"),
+        sortable: true,
+        filterable: true,
+        grows: true,
+        direction: "asc",
+        template: (name, entity: any) => html`
+          <div style="cursor: pointer;">
+            ${name}
+            <div class="secondary">
+              ${entity.stateObj.entity_id}
+            </div>
+          </div>
+        `,
+      },
+    };
+  });
+
   protected render(): TemplateResult {
     if (
       !this.hass ||
@@ -94,45 +134,81 @@ export class HuiCardPicker extends LitElement {
     }
 
     return html`
-      <search-input
-        .filter=${this._filter}
-        no-label-float
-        @value-changed=${this._handleSearchChange}
-        .label=${this.hass.localize(
-          "ui.panel.lovelace.editor.card.generic.search"
-        )}
-      ></search-input>
-      <div
-        id="content"
-        style=${styleMap({
-          width: this._width ? `${this._width}px` : "auto",
-          height: this._height ? `${this._height}px` : "auto",
-        })}
+      <mwc-tab-bar
+        .activeIndex=${this._tabIndex}
+        @MDCTabBar:activated=${(tabIndex) => {
+          this._tabIndex = tabIndex.detail.index;
+        }}
       >
-        <div class="cards-container">
-          ${this._filterCards(this._cards, this._filter).map(
-            (cardElement: CardElement) => cardElement.element
-          )}
-        </div>
-        <div class="cards-container">
-          <div
-            class="card manual"
-            @click=${this._cardPicked}
-            .config=${{ type: "" }}
-          >
-            <div class="card-header">
-              ${this.hass!.localize(
-                `ui.panel.lovelace.editor.card.generic.manual`
+        <mwc-tab label="By Card"></mwc-tab>
+        <mwc-tab label="By Entity"></mwc-tab>
+      </mwc-tab-bar>
+      ${this._tabIndex === 0
+        ? html`
+            <search-input
+              .filter=${this._filter}
+              no-label-float
+              @value-changed=${this._handleSearchChange}
+              .label=${this.hass.localize(
+                "ui.panel.lovelace.editor.card.generic.search"
               )}
+            ></search-input>
+            <div
+              id="content"
+              style=${styleMap({
+                width: this._width ? `${this._width}px` : "auto",
+                height: this._height ? `${this._height}px` : "auto",
+              })}
+            >
+              <div class="cards-container">
+                ${this._filterCards(this._cards, this._filter).map(
+                  (cardElement: CardElement) => cardElement.element
+                )}
+              </div>
+              <div class="cards-container">
+                <div
+                  class="card manual"
+                  @click=${this._cardPicked}
+                  .config=${{ type: "" }}
+                >
+                  <div class="card-header">
+                    ${this.hass!.localize(
+                      `ui.panel.lovelace.editor.card.generic.manual`
+                    )}
+                  </div>
+                  <div class="preview description">
+                    ${this.hass!.localize(
+                      `ui.panel.lovelace.editor.card.generic.manual_description`
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
-            <div class="preview description">
-              ${this.hass!.localize(
-                `ui.panel.lovelace.editor.card.generic.manual_description`
-              )}
+          `
+        : html`
+            <div class="container">
+              <ha-data-table
+                .columns=${this._columns()}
+                .data=${this._unusedEntities.map((entity) => {
+                  const stateObj = this.hass!.states[entity];
+                  return {
+                    icon: "",
+                    entity_id: entity,
+                    stateObj,
+                    name: computeStateName(stateObj),
+                    domain: computeDomain(entity),
+                    last_changed: stateObj!.last_changed,
+                  };
+                }) as DataTableRowData[]}
+                .id=${"entity_id"}
+                selectable
+                .dir=${computeRTLDirection(this.hass)}
+                .searchLabel=${this.hass.localize(
+                  "ui.panel.lovelace.unused_entities.search"
+                )}
+              ></ha-data-table>
             </div>
-          </div>
-        </div>
-      </div>
+          `}
     `;
   }
 
@@ -154,8 +230,11 @@ export class HuiCardPicker extends LitElement {
       return;
     }
 
+    const unusedEntities = computeUnusedEntities(this.hass, this.lovelace!);
+    this._unusedEntities = [...unusedEntities].sort();
+
     const usedEntities = computeUsedEntities(this.lovelace);
-    const unusedEntities = calcUnusedEntities(this.hass, usedEntities);
+    // const unusedEntities = calcUnusedEntities(this.hass, usedEntities);
 
     this._usedEntities = [...usedEntities].filter(
       (eid) =>
@@ -306,6 +385,23 @@ export class HuiCardPicker extends LitElement {
 
         .manual {
           max-width: none;
+        }
+
+        ha-card {
+          --ha-card-box-shadow: none;
+          --ha-card-border-radius: 0;
+        }
+        ha-data-table {
+          --data-table-border-width: 0;
+          flex-grow: 1;
+          margin-top: -20px;
+        }
+
+        .container {
+          display: flex;
+          flex-direction: column;
+          height: 100%;
+          min-height: calc(100vh - 112px);
         }
       `,
     ];
